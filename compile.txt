@@ -1,0 +1,28 @@
+Building a standalone BB_Fab_Browser.exe (Windows)
+==================================================
+
+You do NOT need this to run the app -- it is only for producing a single
+.exe you can run without Python installed.
+
+1. Install the dependencies and PyInstaller:
+
+   py -3.12 -m pip install -r requirements.txt
+   py -3.12 -m pip install pyinstaller
+
+2. Build:
+
+   py -3.12 -m PyInstaller --onefile --windowed --name BB_Fab_Browser .\bb_fab_browser.py
+
+   --windowed suppresses the black console window behind the GUI.
+   Drop it if you want to see tracebacks while debugging.
+
+3. The exe lands in dist\BB_Fab_Browser.exe and is self-contained.
+
+Notes
+-----
+- tkinter and Pillow are picked up automatically; there are no data files,
+  no hidden imports and no --add-data needed.
+- First launch of a --onefile build is slow (it unpacks to a temp dir).
+  Use --onedir instead if that bothers you.
+- The thumbnail cache and settings live in %LOCALAPPDATA%\BBFabBrowser and
+  %APPDATA%\BBFabBrowser, not next to the exe, so the exe stays portable.
