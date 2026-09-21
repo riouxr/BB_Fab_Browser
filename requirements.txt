@@ -1,0 +1,5 @@
+Pillow>=10.0.0
+
+# Optional: enables dragging a folder onto the window to open it.
+# The app runs fine without it.
+# tkinterdnd2>=0.3.0
