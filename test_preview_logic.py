@@ -136,6 +136,100 @@ def _(tmp):
     assert member3 == 'preview.png', 'stale thumbnail served after edit'
 
 
+@case('thumbnails are shared in a folder beside the archives')
+def _(tmp):
+    lib = os.path.join(tmp, 'shared_lib')
+    os.makedirs(lib)
+    path = build_zip(os.path.join(lib, 'brick.zip'),
+                     [('preview.png', png_bytes((300, 300)))])
+    local = os.path.join(tmp, 'user_a_cache')
+    bb.load_preview(path, 128, bb.ThumbnailCache(local))
+
+    shared = os.path.join(lib, bb.SHARED_CACHE_DIR)
+    pngs = [n for n in os.listdir(shared) if n.endswith('.png')]
+    assert len(pngs) == 1 and pngs[0].startswith('brick.zip.128.'), pngs
+    assert not any(n.endswith('.tmp') for n in os.listdir(shared))
+
+    # a second user with an empty local cache is served the shared thumbnail
+    other = bb.ThumbnailCache(os.path.join(tmp, 'user_b_cache'))
+    _thumb, member, error = bb.load_preview(path, 128, other)
+    assert error is None and member is None, 'shared cache was not reused'
+
+
+@case('the shared cache survives the share being mounted at another path')
+def _(tmp):
+    moved = os.path.join(tmp, 'shared_lib_other_mount')
+    shutil.copytree(os.path.join(tmp, 'shared_lib'), moved)   # keeps mtimes
+    cache = bb.ThumbnailCache(os.path.join(tmp, 'user_c_cache'))
+    _thumb, member, error = bb.load_preview(os.path.join(moved, 'brick.zip'),
+                                            128, cache)
+    assert error is None and member is None, 'cache key depends on full path'
+
+
+@case('editing an archive replaces its old shared thumbnail')
+def _(tmp):
+    lib = os.path.join(tmp, 'shared_lib')
+    path = os.path.join(lib, 'brick.zip')
+    build_zip(path, [('preview.png', png_bytes((200, 500)))])
+    os.utime(path, (1000, 1000))
+    cache = bb.ThumbnailCache(os.path.join(tmp, 'user_a_cache'))
+    _thumb, member, _err = bb.load_preview(path, 128, cache)
+    assert member == 'preview.png', 'stale shared thumbnail served after edit'
+    shared = os.path.join(lib, bb.SHARED_CACHE_DIR)
+    pngs = [n for n in os.listdir(shared) if n.startswith('brick.zip.128.')]
+    assert len(pngs) == 1, pngs
+
+
+@case('an unwritable shared folder falls back to the local cache')
+def _(tmp):
+    lib = os.path.join(tmp, 'blocked_lib')
+    os.makedirs(lib)
+    # a plain file where the cache folder would go makes it impossible to create
+    with open(os.path.join(lib, bb.SHARED_CACHE_DIR), 'w') as fh:
+        fh.write('in the way')
+    path = build_zip(os.path.join(lib, 'tile.zip'),
+                     [('preview.png', png_bytes())])
+    cache = bb.ThumbnailCache(os.path.join(tmp, 'user_d_cache'))
+    bb.load_preview(path, 128, cache)
+    _thumb, member, error = bb.load_preview(path, 128, cache)
+    assert error is None and member is None, 'local fallback not used'
+
+
+@case('thumbnails already in the local cache get copied to the shared one')
+def _(tmp):
+    lib = os.path.join(tmp, 'legacy_lib')
+    os.makedirs(lib)
+    path = build_zip(os.path.join(lib, 'wood.zip'), [('preview.png', png_bytes())])
+    local = os.path.join(tmp, 'user_e_cache')
+    bb.load_preview(path, 128, bb.ThumbnailCache(local, shared=False))
+    assert not os.path.exists(os.path.join(lib, bb.SHARED_CACHE_DIR))
+
+    _thumb, member, _err = bb.load_preview(path, 128, bb.ThumbnailCache(local))
+    assert member is None, 'local thumbnail was not used'
+    shared = os.path.join(lib, bb.SHARED_CACHE_DIR)
+    assert os.path.isdir(shared) and os.listdir(shared), 'not copied to shared'
+
+
+@case('clear empties the local and shared caches')
+def _(tmp):
+    lib = os.path.join(tmp, 'shared_lib')
+    cache = bb.ThumbnailCache(os.path.join(tmp, 'user_a_cache'))
+    assert cache.clear([lib]) >= 1
+    assert not os.path.exists(os.path.join(lib, bb.SHARED_CACHE_DIR))
+    _thumb, member, _err = bb.load_preview(os.path.join(lib, 'brick.zip'),
+                                           128, cache)
+    assert member == 'preview.png', 'thumbnail still cached after clear'
+
+
+@case('the cache folder stays out of the folder tree')
+def _(tmp):
+    base = os.path.join(tmp, 'with_cache')
+    os.makedirs(os.path.join(base, bb.SHARED_CACHE_DIR))
+    os.makedirs(os.path.join(base, 'Metals'))
+    names = [name for name, _path in bb.subdirectories(base)]
+    assert names == ['Metals'], names
+
+
 @case('alpha previews are flattened, never left as RGBA')
 def _(tmp):
     buf = io.BytesIO()

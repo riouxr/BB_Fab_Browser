@@ -35,9 +35,12 @@ is extracted to disk — and lays them all out in a thumbnail grid.
   (`_Normal`, `_Albedo`, `_Roughness`, ...) ranks lower. macOS `__MACOSX`
   resource forks are skipped. If a pack has no png at all, a jpg preview is
   used instead.
-- **Disk-backed thumbnail cache**, keyed on the archive's path, size and
-  modification time — the first pass through a big folder is the slow one, and
-  re-editing an archive invalidates its thumbnail automatically.
+- **Shared thumbnail cache.** Thumbnails are saved in a `bbfab_cache` folder
+  next to the zips, so when a team browses the same network share only
+  the first person to open a folder pays for generating them. The cache is
+  keyed on the archive's name, size and modification time (not its full path),
+  so it works whether the share is mounted as `Z:\`, `\\server\share` or
+  `/mnt/share`, and re-editing an archive replaces its thumbnail automatically.
 - **Loads in the background**, four archives at a time, so the window stays
   responsive while a folder of hundreds fills in.
 - **Include subfolders** to flatten an entire library into one grid.
@@ -139,7 +142,11 @@ needing a display.
 
 | | Windows | macOS | Linux |
 | --- | --- | --- | --- |
-| Cache | `%LOCALAPPDATA%\BBFabBrowser\cache` | `~/Library/Caches/BBFabBrowser` | `~/.cache/bb-fab-browser` |
+| Shared cache | `bbfab_cache\` inside each folder of zips | same | same |
+| Local cache (fallback) | `%LOCALAPPDATA%\BBFabBrowser\cache` | `~/Library/Caches/BBFabBrowser` | `~/.cache/bb-fab-browser` |
 | Settings | `%APPDATA%\BBFabBrowser\settings.json` | `~/Library/Application Support/BBFabBrowser/settings.json` | `~/.config/bb-fab-browser/settings.json` |
 
-**Clear thumbnail cache** in the toolbar empties the cache directory.
+Thumbnails go to the shared `bbfab_cache` folder whenever you can write to the
+folder holding the zips; on read-only folders they go to your local cache
+instead. **Clear thumbnail cache** in the toolbar empties your local cache and
+the shared cache of the folders currently on screen.

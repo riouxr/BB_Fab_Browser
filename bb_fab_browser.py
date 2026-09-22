@@ -13,6 +13,7 @@ Left pane : folder tree
 Right pane: preview grid for the selected folder
 """
 
+import errno
 import io
 import json
 import hashlib
@@ -198,55 +199,167 @@ def placeholder_thumbnail(size, text='no preview'):
     return img
 
 
-class ThumbnailCache:
-    """Disk-backed thumbnail cache keyed on archive path + mtime + size."""
+# Folder written next to the archives. It's left visible in the file manager
+# but kept out of the app's own folder tree and archive scan.
+SHARED_CACHE_DIR = 'bbfab_cache'
 
-    def __init__(self, directory=None):
+
+class ThumbnailCache:
+    """Disk-backed thumbnail cache.
+
+    Thumbnails are written to a bbfab_cache folder beside the archives,
+    so everyone browsing the same network share reuses them instead of each
+    rebuilding their own. Folders that can't be written to fall back to a
+    per-user cache in `directory`.
+    """
+
+    def __init__(self, directory=None, shared=True):
+        self.shared = shared
         self.dir = directory or user_cache_dir()
         try:
             os.makedirs(self.dir, exist_ok=True)
         except Exception:
             self.dir = None
+        self._read_only = set()   # folders whose shared cache we can't write
 
-    def _key(self, path, stat, thumb_size):
+    # -- naming ----------------------------------------------------------
+
+    @staticmethod
+    def _version(stat):
+        # Whole seconds: SMB clients on different OSes disagree about
+        # sub-second mtime precision on the same file.
+        raw = '%d|%d' % (int(stat.st_mtime), stat.st_size)
+        return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:12]
+
+    @staticmethod
+    def _shared_prefix(path, thumb_size):
+        # Keyed on the file name, never the full path: the same share shows up
+        # as Z:\, \\server\share or /mnt/share depending on who is looking.
+        return '%s.%d.' % (os.path.basename(path), thumb_size)
+
+    def _shared_file(self, path, stat, thumb_size):
+        folder = os.path.join(os.path.dirname(os.path.abspath(path)),
+                              SHARED_CACHE_DIR)
+        name = self._shared_prefix(path, thumb_size) + self._version(stat) + '.png'
+        return os.path.join(folder, name)
+
+    def _local_file(self, path, stat, thumb_size):
         raw = '%s|%d|%d|%d' % (os.path.abspath(path), stat.st_mtime_ns,
                                stat.st_size, thumb_size)
-        return hashlib.sha1(raw.encode('utf-8')).hexdigest()
-
-    def _file(self, key):
+        key = hashlib.sha1(raw.encode('utf-8')).hexdigest()
         return os.path.join(self.dir, key[:2], key + '.png')
 
-    def get(self, path, stat, thumb_size):
-        if not self.dir:
-            return None
+    # -- read / write ----------------------------------------------------
+
+    @staticmethod
+    def _read(target):
         try:
-            with Image.open(self._file(self._key(path, stat, thumb_size))) as img:
+            with Image.open(target) as img:
+                img.load()
                 return img.copy()
         except Exception:
             return None
 
-    def put(self, path, stat, thumb_size, image):
+    def get(self, path, stat, thumb_size):
+        if self.shared:
+            image = self._read(self._shared_file(path, stat, thumb_size))
+            if image is not None:
+                return image
         if not self.dir:
-            return
-        try:
-            target = self._file(self._key(path, stat, thumb_size))
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            image.save(target, 'PNG')
-        except Exception:
-            pass
+            return None
+        image = self._read(self._local_file(path, stat, thumb_size))
+        if image is not None and self.shared:
+            # Built before sharing existed, or while the folder was read-only:
+            # hand it to everyone else now.
+            self._put_shared(path, stat, thumb_size, image)
+        return image
 
-    def clear(self):
-        if not self.dir or not os.path.isdir(self.dir):
-            return 0
+    def _put_shared(self, path, stat, thumb_size, image):
+        """Write to the folder's shared cache; False if that isn't possible."""
+        folder = os.path.dirname(os.path.abspath(path))
+        if folder in self._read_only:
+            return False
+        target = self._shared_file(path, stat, thumb_size)
+        try:
+            self._write(target, image)
+        except OSError as exc:
+            if isinstance(exc, PermissionError) or exc.errno == errno.EROFS:
+                self._read_only.add(folder)   # don't retry every archive
+            return False
+        self._prune(target, self._shared_prefix(path, thumb_size))
+        return True
+
+    def put(self, path, stat, thumb_size, image):
+        if self.shared and self._put_shared(path, stat, thumb_size, image):
+            return
+        if self.dir:
+            try:
+                self._write(self._local_file(path, stat, thumb_size), image)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _write(target, image):
+        folder = os.path.dirname(target)
+        if not os.path.isdir(folder):
+            os.makedirs(folder, exist_ok=True)
+        # Write then rename, so another user reading the share never sees a
+        # half-written png.
+        tmp = '%s.%s.tmp' % (target, os.urandom(4).hex())
+        try:
+            image.save(tmp, 'PNG')
+            try:
+                os.replace(tmp, target)
+            except OSError:
+                # Someone else finished the same thumbnail first and has it
+                # open; theirs is just as good.
+                if not os.path.isfile(target):
+                    raise
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _prune(target, prefix):
+        """Drop thumbnails of older versions of the same archive."""
+        folder, keep = os.path.split(target)
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            return
+        for name in names:
+            rest = name[len(prefix):]
+            if (name != keep and name.startswith(prefix)
+                    and name.endswith('.png') and rest.count('.') == 1):
+                try:
+                    os.remove(os.path.join(folder, name))
+                except OSError:
+                    pass
+
+    def clear(self, folders=()):
+        """Empty the per-user cache and the shared caches of `folders`."""
         removed = 0
-        for root, _dirs, files in os.walk(self.dir):
-            for name in files:
-                if name.endswith('.png'):
-                    try:
-                        os.remove(os.path.join(root, name))
-                        removed += 1
-                    except OSError:
-                        pass
+        roots = [self.dir] if self.dir else []
+        roots += [os.path.join(f, SHARED_CACHE_DIR) for f in folders]
+        for top in roots:
+            if not os.path.isdir(top):
+                continue
+            for root, _dirs, files in os.walk(top):
+                for name in files:
+                    if name.endswith('.png'):
+                        try:
+                            os.remove(os.path.join(root, name))
+                            removed += 1
+                        except OSError:
+                            pass
+        for folder in folders:
+            try:
+                os.rmdir(os.path.join(folder, SHARED_CACHE_DIR))
+            except OSError:
+                pass
         return removed
 
 
@@ -899,7 +1012,7 @@ def root_label(path):
 
 
 def _skip_entry(entry):
-    if entry.name.startswith('.'):
+    if entry.name.startswith('.') or entry.name == SHARED_CACHE_DIR:
         return True
     if sys.platform == 'win32' and entry.name.lower() in WINDOWS_SKIP:
         return True
@@ -1255,7 +1368,8 @@ class FabBrowser:
         found = []
         if recursive:
             for base, dirs, files in os.walk(folder):
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                dirs[:] = [d for d in dirs
+                           if not d.startswith('.') and d != SHARED_CACHE_DIR]
                 for name in files:
                     if name.lower().endswith(ARCHIVE_EXTS) and not name.startswith('.'):
                         found.append(os.path.join(base, name))
@@ -1337,8 +1451,13 @@ class FabBrowser:
         DetailWindow(self.root, item['path'])
 
     def clear_cache(self):
-        removed = self.cache.clear()
-        messagebox.showinfo(APP_NAME, 'Removed %d cached thumbnails.' % removed)
+        folders = {os.path.dirname(item['path']) for item in self.grid.items}
+        if self.current_dir:
+            folders.add(self.current_dir)
+        removed = self.cache.clear(folders)
+        messagebox.showinfo(
+            APP_NAME, 'Removed %d cached thumbnails from your local cache and '
+                      'the shared cache of the folders on screen.' % removed)
         self.refresh()
 
     def _on_close(self):

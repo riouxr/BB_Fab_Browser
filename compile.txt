@@ -1,6 +1,10 @@
 Building a standalone BB_Fab_Browser.exe (Windows)
 ==================================================
 
+Quick way: double-click build_exe.bat. It installs the dependencies, runs the
+self-test and builds dist\BB_Fab_Browser.exe. The steps below are the manual
+equivalent.
+
 You do NOT need this to run the app -- it is only for producing a single
 .exe you can run without Python installed.
 
@@ -24,5 +28,7 @@ Notes
   no hidden imports and no --add-data needed.
 - First launch of a --onefile build is slow (it unpacks to a temp dir).
   Use --onedir instead if that bothers you.
-- The thumbnail cache and settings live in %LOCALAPPDATA%\BBFabBrowser and
-  %APPDATA%\BBFabBrowser, not next to the exe, so the exe stays portable.
+- Thumbnails are cached in a bbfab_cache folder next to the zips (shared by
+  everyone browsing that folder), falling back to %LOCALAPPDATA%\BBFabBrowser
+  for read-only folders. Settings live in %APPDATA%\BBFabBrowser. Nothing is
+  written next to the exe, so it stays portable.
