@@ -43,9 +43,13 @@ is extracted to disk — and lays them all out in a thumbnail grid.
 - **Include subfolders** to flatten an entire library into one grid.
 - **Search** filters the visible grid by pack name as you type.
 - **Adjustable thumbnail size**, 96 px to 320 px.
-- **Double-click any pack** for a large preview, the full file listing with
-  sizes, and buttons to reveal it in your file manager, copy its path, or save
-  the preview image out as a png/jpg.
+- **Double-click any pack** to open it. The detail window lists everything in
+  the archive and **any file in that list can be clicked to view it** -- flip
+  through the albedo, normal, roughness and height maps without extracting
+  anything. The image scales to fit the window as you resize it, the preview
+  row is marked, and non-image files are listed but not opened. Buttons reveal
+  the pack in your file manager, copy its path, or save whichever image you're
+  looking at as a png/jpg.
 - Remembers your last folder, thumbnail size and subfolder setting between runs;
   on startup the tree expands straight back to where you left off.
 
@@ -99,6 +103,8 @@ Then click **Open folder...** and pick the folder holding your texture zips.
 | Right-click | Details, show in file manager, copy path |
 | Arrow keys | Move around the grid |
 | Mouse wheel | Scroll the grid |
+| Click a row in the detail window | View that file from inside the zip |
+| Up/Down in the detail list | Step through the maps |
 | Esc (detail window) | Close |
 
 ## How the preview is chosen

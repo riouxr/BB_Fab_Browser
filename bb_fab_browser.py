@@ -287,13 +287,22 @@ def load_preview(path, thumb_size, cache):
     return thumb, member_name, None
 
 
-def list_archive_contents(path):
-    try:
-        with zipfile.ZipFile(path) as zf:
-            return [(i.filename, i.file_size) for i in zf.infolist()
-                    if not i.filename.endswith('/')]
-    except Exception:
-        return []
+# Anything Pillow will open from inside an archive. Files outside this list
+# are listed but shown as "not an image" rather than attempted.
+VIEWABLE_EXTS = PREFERRED_EXTS + FALLBACK_EXTS + (
+    '.tga', '.tif', '.tiff', '.gif', '.ico', '.ppm', '.pgm', '.dds')
+
+
+def is_viewable(name):
+    return os.path.splitext(name.lower())[1] in VIEWABLE_EXTS
+
+
+def human_size(size):
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if size < 1024 or unit == 'GB':
+            return '%d %s' % (size, unit) if unit == 'B' else '%.1f %s' % (size, unit)
+        size /= 1024.0
+    return '%d B' % size
 
 
 def reveal_in_file_manager(path):
@@ -622,38 +631,55 @@ class PreviewGrid(ttk.Frame):
 # --------------------------------------------------------------------------
 
 class DetailWindow(tk.Toplevel):
-    """Large preview plus the archive's file listing."""
+    """Large image view plus a clickable listing of everything in the archive.
 
-    MAX_PREVIEW = 720
+    Selecting any row loads that file from the zip and shows it, so you can
+    flip through the texture maps, not just the preview render.
+    """
 
     def __init__(self, master, path):
         super().__init__(master)
         self.path = path
         self.title(os.path.basename(path))
-        self.geometry('1000x700')
+        self.geometry('1100x760')
         self.configure(bg=CHROME_BG)
-        self.photo = None
+
+        self.photo = None            # keeps the PhotoImage alive
+        self.current_image = None    # full-size PIL image on show
+        self.current_name = None
+        self.row_member = {}         # tree iid -> member name
+        self.preview_member = None
+        self._load_token = 0
+        self._render_job = None
+        self._rendered_for = None
 
         panes = ttk.PanedWindow(self, orient='horizontal')
         panes.pack(fill='both', expand=True, padx=8, pady=8)
 
         left = ttk.Frame(panes)
-        self.image_label = tk.Label(left, bg=GRID_BG, text='Loading preview...',
-                                    fg=TEXT_FG_DIM)
+        self.image_frame = tk.Frame(left, bg=GRID_BG, highlightthickness=0)
+        self.image_frame.pack(fill='both', expand=True)
+        self.image_label = tk.Label(self.image_frame, bg=GRID_BG, fg=TEXT_FG_DIM,
+                                    text='Loading...')
         self.image_label.pack(fill='both', expand=True)
+        self.image_frame.bind('<Configure>', self._on_pane_resize)
         panes.add(left, weight=3)
 
         right = ttk.Frame(panes)
-        ttk.Label(right, text='Archive contents').pack(anchor='w', pady=(0, 4))
-        columns = ('size',)
-        self.tree = ttk.Treeview(right, columns=columns, show='tree headings')
+        ttk.Label(right, text='Archive contents  -  click a file to view it'
+                  ).pack(anchor='w', pady=(0, 4))
+        self.tree = ttk.Treeview(right, columns=('size',), show='tree headings',
+                                 selectmode='browse')
         self.tree.heading('#0', text='File')
         self.tree.heading('size', text='Size')
         self.tree.column('size', width=90, anchor='e', stretch=False)
+        self.tree.tag_configure('preview', foreground='#8fc7ff')
+        self.tree.tag_configure('other', foreground=TEXT_FG_DIM)
         vsb = ttk.Scrollbar(right, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side='left', fill='both', expand=True)
         vsb.pack(side='right', fill='y')
+        self.tree.bind('<<TreeviewSelect>>', self._on_row_select)
         panes.add(right, weight=2)
 
         bar = ttk.Frame(self)
@@ -662,77 +688,167 @@ class DetailWindow(tk.Toplevel):
                    command=lambda: reveal_in_file_manager(self.path)).pack(side='left')
         ttk.Button(bar, text='Copy path',
                    command=self._copy_path).pack(side='left', padx=6)
-        ttk.Button(bar, text='Save preview as...',
-                   command=self._save_preview).pack(side='left')
+        ttk.Button(bar, text='Save image as...',
+                   command=self._save_image).pack(side='left')
         ttk.Button(bar, text='Close', command=self.destroy).pack(side='right')
 
-        self.status = ttk.Label(self, text='', anchor='w')
+        self.status = ttk.Label(self, text=self.path, anchor='w')
         self.status.pack(fill='x', padx=8, pady=(0, 6))
 
         self.bind('<Escape>', lambda e: self.destroy())
         self.after(10, self._populate)
 
-    def _populate(self):
-        contents = list_archive_contents(self.path)
-        for name, size in sorted(contents, key=lambda c: c[0].lower()):
-            self.tree.insert('', 'end', text=name, values=(self._human(size),))
+    # -- contents listing ------------------------------------------------
 
-        self.preview_image = None
+    def _populate(self):
         try:
             with zipfile.ZipFile(self.path) as zf:
                 member = find_preview_member(zf)
-                if member is not None:
-                    data = zf.read(member)
-                    with Image.open(io.BytesIO(data)) as img:
-                        img.load()
-                        self.preview_image = img.copy()
-                    self.status.configure(
-                        text='%s  -  preview: %s  (%d x %d)'
-                             % (self.path, member.filename,
-                                self.preview_image.width,
-                                self.preview_image.height))
+                self.preview_member = member.filename if member else None
+                contents = [(i.filename, i.file_size) for i in zf.infolist()
+                            if not i.filename.endswith('/')]
         except Exception as exc:
+            self.image_label.configure(text='Cannot open this archive:\n%s' % exc)
             self.status.configure(text='%s  -  %s' % (self.path, exc))
-
-        if self.preview_image is None:
-            self.image_label.configure(text='No preview image in this archive')
-            if not self.status.cget('text'):
-                self.status.configure(text=self.path)
             return
 
-        shown = make_thumbnail(self.preview_image, self.MAX_PREVIEW, bg=GRID_BG)
+        if not contents:
+            self.image_label.configure(text='This archive is empty')
+            return
+
+        preview_row = None
+        for name, size in sorted(contents, key=lambda c: c[0].lower()):
+            viewable = is_viewable(name)
+            tag = 'preview' if name == self.preview_member else (
+                'other' if not viewable else '')
+            label = name + ('   <- preview' if name == self.preview_member else '')
+            iid = self.tree.insert('', 'end', text=label,
+                                   values=(human_size(size),),
+                                   tags=(tag,) if tag else ())
+            self.row_member[iid] = name
+            if name == self.preview_member:
+                preview_row = iid
+
+        first = preview_row or self.tree.get_children('')[0]
+        self.tree.selection_set(first)
+        self.tree.focus(first)
+        self.tree.see(first)
+
+    def _on_row_select(self, _event):
+        selection = self.tree.selection()
+        if not selection:
+            return
+        name = self.row_member.get(selection[0])
+        if name and name != self.current_name:
+            self._show_member(name)
+
+    # -- loading one member ----------------------------------------------
+
+    def _show_member(self, name):
+        self.current_name = name
+        self._load_token += 1
+        token = self._load_token
+
+        if not is_viewable(name):
+            self.current_image = None
+            self.photo = None
+            self.image_label.configure(
+                image='', text='%s\n\nNot an image file.' % os.path.basename(name))
+            self.status.configure(text='%s  -  %s' % (self.path, name))
+            return
+
+        self.image_label.configure(image='', text='Loading %s...'
+                                   % os.path.basename(name))
+
+        def work():
+            try:
+                with zipfile.ZipFile(self.path) as zf:
+                    data = zf.read(name)
+                with Image.open(io.BytesIO(data)) as img:
+                    img.load()
+                    loaded = img.copy()
+            except Exception as exc:
+                loaded, error = None, str(exc)
+            else:
+                error = None
+            self.after(0, lambda: deliver(loaded, error))
+
+        def deliver(loaded, error):
+            if token != self._load_token:
+                return               # user clicked something else meanwhile
+            if loaded is None:
+                self.current_image = None
+                self.photo = None
+                self.image_label.configure(image='', text='Cannot display this '
+                                           'file:\n%s' % error)
+                self.status.configure(text='%s  -  %s' % (self.path, error))
+                return
+            self.current_image = loaded
+            self._rendered_for = None
+            self._render()
+            self.status.configure(
+                text='%s  -  %s  (%d x %d, %s)'
+                     % (self.path, name, loaded.width, loaded.height,
+                        loaded.mode))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # -- rendering to fit the pane ---------------------------------------
+
+    def _on_pane_resize(self, _event):
+        if self._render_job:
+            self.after_cancel(self._render_job)
+        self._render_job = self.after(120, self._render)
+
+    def _render(self):
+        self._render_job = None
+        if self.current_image is None:
+            return
+        width = self.image_frame.winfo_width() - 8
+        height = self.image_frame.winfo_height() - 8
+        if width < 40 or height < 40:
+            return
+        if self._rendered_for == (width, height):
+            return
+        self._rendered_for = (width, height)
+        # thumbnail() only ever shrinks, so small previews are never blown up
+        shown = self.current_image.copy()
+        shown.thumbnail((width, height), Image.LANCZOS)
+        if shown.mode in ('RGBA', 'LA', 'P'):
+            shown = shown.convert('RGBA')
+            flat = Image.new('RGB', shown.size, GRID_BG)
+            flat.paste(shown, mask=shown.split()[-1])
+            shown = flat
+        else:
+            shown = shown.convert('RGB')
         self.photo = ImageTk.PhotoImage(shown)
         self.image_label.configure(image=self.photo, text='')
 
-    @staticmethod
-    def _human(size):
-        for unit in ('B', 'KB', 'MB', 'GB'):
-            if size < 1024 or unit == 'GB':
-                return '%.0f %s' % (size, unit) if unit == 'B' else '%.1f %s' % (size, unit)
-            size /= 1024.0
-        return '%d B' % size
+    # -- buttons ----------------------------------------------------------
 
     def _copy_path(self):
         self.clipboard_clear()
         self.clipboard_append(self.path)
 
-    def _save_preview(self):
-        if self.preview_image is None:
+    def _save_image(self):
+        if self.current_image is None:
+            messagebox.showinfo(APP_NAME, 'No image is being shown.', parent=self)
             return
+        stem = os.path.splitext(os.path.basename(self.current_name or 'image'))[0]
         target = filedialog.asksaveasfilename(
             parent=self,
             defaultextension='.png',
-            initialfile=os.path.splitext(os.path.basename(self.path))[0] + '_preview.png',
+            initialfile=stem + '.png',
             filetypes=[('PNG image', '*.png'), ('JPEG image', '*.jpg')])
         if not target:
             return
         try:
-            image = self.preview_image
+            image = self.current_image
             if target.lower().endswith(('.jpg', '.jpeg')):
                 image = image.convert('RGB')
             image.save(target)
         except Exception as exc:
-            messagebox.showerror(APP_NAME, 'Could not save preview:\n%s' % exc,
+            messagebox.showerror(APP_NAME, 'Could not save image:\n%s' % exc,
                                  parent=self)
 
 
