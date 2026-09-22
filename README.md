@@ -61,6 +61,18 @@ on Linux install it from your package manager if it's missing
 Optionally `pip install tkinterdnd2` to enable dragging a folder onto the window
 to open it. The app works fine without it.
 
+## Trying it without a texture library
+
+If you want to see it working before pointing it at real packs:
+
+```bash
+python make_sample_library.py
+```
+
+That writes 16 fake texture packs (jpg maps + a png preview each, ~600 KB
+total) into `sample_library/`, laid out in category folders. Open that folder
+in the app.
+
 ## Usage
 
 ```bash
