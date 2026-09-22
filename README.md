@@ -23,8 +23,10 @@ is extracted to disk — and lays them all out in a thumbnail grid.
 
 ## Features
 
-- **Folder tree on the left, previews on the right.** Click a folder, see every
-  pack in it.
+- **Full disk tree on the left, previews on the right.** The sidebar shows every
+  drive (or `/` and your home folder), so you browse your whole machine without
+  re-picking a root folder each time. Folders are read as you expand them, so a
+  slow or disconnected drive costs nothing until you click it.
 - **Nothing is extracted.** Previews are read from inside the zip and decoded in
   memory.
 - **Smart preview detection.** In a pack of `.jpg` maps the lone `.png` is the
@@ -44,7 +46,8 @@ is extracted to disk — and lays them all out in a thumbnail grid.
 - **Double-click any pack** for a large preview, the full file listing with
   sizes, and buttons to reveal it in your file manager, copy its path, or save
   the preview image out as a png/jpg.
-- Remembers your last folder, thumbnail size and subfolder setting between runs.
+- Remembers your last folder, thumbnail size and subfolder setting between runs;
+  on startup the tree expands straight back to where you left off.
 
 ## Installation
 
@@ -89,6 +92,8 @@ Then click **Open folder...** and pick the folder holding your texture zips.
 | Action | Result |
 | --- | --- |
 | Click a folder in the tree | Show that folder's packs |
+| **Go to folder...** | Jump the tree straight to a folder and select it |
+| **Refresh** | Re-read the current folder, on disk and in the tree |
 | Click a thumbnail | Select it; the status bar names the preview file used |
 | Double-click / Enter | Open the detail window |
 | Right-click | Details, show in file manager, copy path |

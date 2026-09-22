@@ -146,6 +146,47 @@ def _(tmp):
     assert error is None and thumb.mode == 'RGB', thumb.mode
 
 
+@case('subdirectories lists only folders, sorted, dotfiles skipped')
+def _(tmp):
+    base = os.path.join(tmp, 'tree')
+    for name in ('Zebra', 'apple', '.hidden', 'Mango'):
+        os.makedirs(os.path.join(base, name), exist_ok=True)
+    with open(os.path.join(base, 'loose.txt'), 'w') as fh:
+        fh.write('not a folder')
+    names = [name for name, _path in bb.subdirectories(base)]
+    assert names == ['apple', 'Mango', 'Zebra'], names
+
+
+@case('subdirectories returns empty for missing or unreadable paths')
+def _(tmp):
+    assert bb.subdirectories(os.path.join(tmp, 'does-not-exist')) == []
+    assert bb.subdirectories(os.path.join(tmp, 'tree', 'apple')) == []
+
+
+@case('has_subdirectory agrees with subdirectories')
+def _(tmp):
+    base = os.path.join(tmp, 'tree')
+    assert bb.has_subdirectory(base) is True
+    assert bb.has_subdirectory(os.path.join(base, 'apple')) is False
+    assert bb.has_subdirectory(os.path.join(tmp, 'nope')) is False
+
+
+@case('a folder holding only dotfolders reports no children')
+def _(tmp):
+    base = os.path.join(tmp, 'dotty')
+    os.makedirs(os.path.join(base, '.git'), exist_ok=True)
+    assert bb.has_subdirectory(base) is False
+    assert bb.subdirectories(base) == []
+
+
+@case('tree roots exist and are absolute')
+def _(tmp):
+    roots = bb.list_tree_roots()
+    assert roots, 'no filesystem roots reported'
+    for root in roots:
+        assert os.path.isabs(root), root
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix='bbfab-test-')
     failures = 0

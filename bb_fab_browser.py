@@ -737,6 +737,96 @@ class DetailWindow(tk.Toplevel):
 
 
 # --------------------------------------------------------------------------
+# Filesystem tree helpers
+# --------------------------------------------------------------------------
+
+# Folders Windows keeps at the root of a drive that are noise in a browser
+WINDOWS_SKIP = {
+    '$recycle.bin', 'system volume information', 'config.msi', 'recovery',
+    '$winreagent', '$sysreset', 'msocache', 'perflogs',
+}
+
+
+def list_tree_roots():
+    """Top-level nodes for the folder tree: every drive, or / and home."""
+    if sys.platform == 'win32':
+        roots = []
+        try:
+            import ctypes
+            bits = ctypes.windll.kernel32.GetLogicalDrives()
+        except Exception:
+            bits = 0
+        if bits:
+            # No I/O here: expanding a drive is what actually touches it, so a
+            # disconnected network drive costs nothing until you click it.
+            for i in range(26):
+                if bits >> i & 1:
+                    roots.append('%s:\\' % chr(ord('A') + i))
+        if not roots:
+            roots = [d for d in ('%s:\\' % c for c in 'CDEFGH')
+                     if os.path.isdir(d)]
+        return roots
+
+    home = os.path.expanduser('~')
+    roots = ['/']
+    if os.path.isdir(home):
+        roots.append(home)
+    return roots
+
+
+def root_label(path):
+    if sys.platform == 'win32':
+        return path.rstrip('\\')            # "C:"
+    if path == '/':
+        return '/  (filesystem)'
+    return 'Home  (%s)' % os.path.basename(path.rstrip('/'))
+
+
+def _skip_entry(entry):
+    if entry.name.startswith('.'):
+        return True
+    if sys.platform == 'win32' and entry.name.lower() in WINDOWS_SKIP:
+        return True
+    return False
+
+
+def subdirectories(path):
+    """Immediate subdirectories of path, sorted, unreadable ones skipped."""
+    found = []
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                if _skip_entry(entry):
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        found.append((entry.name, entry.path))
+                except OSError:
+                    continue
+    except (OSError, ValueError):
+        return []
+    found.sort(key=lambda pair: pair[0].lower())
+    return found
+
+
+def has_subdirectory(path):
+    """Like subdirectories() but stops at the first hit — used for arrows."""
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                if _skip_entry(entry):
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        return True
+                except OSError:
+                    continue
+    except (OSError, ValueError):
+        return False
+    return False
+
+
+# --------------------------------------------------------------------------
 # Theme
 # --------------------------------------------------------------------------
 
@@ -815,10 +905,12 @@ class FabBrowser:
 
         self.settings = load_settings()
         self.cache = ThumbnailCache()
-        self.root_dir = None
         self.current_dir = None
         self._scan_token = 0
-        self._dummy_id = 0
+        self._node_seq = 0
+        self.node_path = {}      # tree iid -> absolute path
+        self.populated = set()   # iids whose children have been read
+        self.placeholders = set()
 
         self.search_var = tk.StringVar()
         self.size_var = tk.IntVar(
@@ -830,9 +922,10 @@ class FabBrowser:
         self._build_ui()
         self._enable_drop()
 
-        last = self.settings.get('root_dir')
+        self._build_tree()
+        last = self.settings.get('last_dir')
         if last and os.path.isdir(last):
-            self.set_root(last)
+            self.reveal_path(last)
 
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
 
@@ -842,8 +935,8 @@ class FabBrowser:
         toolbar = ttk.Frame(self.root, padding=(8, 6))
         toolbar.pack(fill='x')
 
-        ttk.Button(toolbar, text='Open folder...',
-                   command=self.choose_root).pack(side='left')
+        ttk.Button(toolbar, text='Go to folder...',
+                   command=self.choose_folder).pack(side='left')
         ttk.Button(toolbar, text='Refresh',
                    command=self.refresh).pack(side='left', padx=(6, 12))
 
@@ -874,9 +967,14 @@ class FabBrowser:
         self.tree = ttk.Treeview(tree_frame, show='tree', selectmode='browse')
         tvsb = ttk.Scrollbar(tree_frame, orient='vertical',
                              command=self.tree.yview)
-        self.tree.configure(yscrollcommand=tvsb.set)
-        self.tree.pack(side='left', fill='both', expand=True)
+        thsb = ttk.Scrollbar(tree_frame, orient='horizontal',
+                             command=self.tree.xview)
+        self.tree.configure(yscrollcommand=tvsb.set, xscrollcommand=thsb.set)
+        # deep trees indent past the pane width, so the tree scrolls sideways
+        self.tree.column('#0', width=420, minwidth=160, stretch=False)
         tvsb.pack(side='right', fill='y')
+        thsb.pack(side='bottom', fill='x')
+        self.tree.pack(side='left', fill='both', expand=True)
         self.tree.bind('<<TreeviewOpen>>', self._on_tree_open)
         self.tree.bind('<<TreeviewSelect>>', self._on_tree_select)
         panes.add(tree_frame, weight=1)
@@ -913,63 +1011,127 @@ class FabBrowser:
         if os.path.isfile(path):
             path = os.path.dirname(path)
         if os.path.isdir(path):
-            self.set_root(path)
+            self.reveal_path(path)
 
     # -- folder tree -----------------------------------------------------
 
-    def choose_root(self):
-        initial = self.root_dir or os.path.expanduser('~')
-        chosen = filedialog.askdirectory(title='Choose a folder of texture zips',
-                                         initialdir=initial)
-        if chosen:
-            self.set_root(chosen)
-
-    def set_root(self, path):
-        self.root_dir = os.path.abspath(path)
+    def _build_tree(self):
+        """Seed the tree with every drive (Windows) or / and home."""
         self.tree.delete(*self.tree.get_children())
-        label = os.path.basename(self.root_dir) or self.root_dir
-        node = self.tree.insert('', 'end', iid=self.root_dir, text=label,
-                                open=True)
-        self._populate_node(node)
-        self.tree.selection_set(node)
-        self.tree.focus(node)
-        self.settings['root_dir'] = self.root_dir
-        save_settings(self.settings)
+        self.node_path.clear()
+        self.populated.clear()
+        self.placeholders.clear()
+        for path in list_tree_roots():
+            # roots always get an arrow without being scanned, so a slow or
+            # disconnected drive never stalls startup
+            self._add_node('', path, root_label(path), probe=False)
 
-    def _subdirs(self, path):
-        try:
-            entries = [e for e in os.scandir(path)
-                       if e.is_dir(follow_symlinks=False)
-                       and not e.name.startswith('.')]
-        except OSError:
-            return []
-        entries.sort(key=lambda e: e.name.lower())
-        return entries
+    def _add_node(self, parent, path, text, probe=True):
+        self._node_seq += 1
+        iid = 'n%d' % self._node_seq
+        self.tree.insert(parent, 'end', iid=iid, text=' ' + text)
+        self.node_path[iid] = path
+        if not probe or has_subdirectory(path):
+            self._add_placeholder(iid)
+        return iid
 
-    def _populate_node(self, node):
-        """Fill a node with its subdirectories, one level deep."""
-        for child in self.tree.get_children(node):
-            self.tree.delete(child)
-        for entry in self._subdirs(node):
-            child = self.tree.insert(node, 'end', iid=entry.path, text=entry.name)
-            if self._subdirs(entry.path):
-                # placeholder child so the node shows an expand arrow; the real
-                # children are read when the user opens it
-                self._dummy_id += 1
-                self.tree.insert(child, 'end',
-                                 iid='\u2400dummy%d' % self._dummy_id, text='')
+    def _add_placeholder(self, parent):
+        self._node_seq += 1
+        iid = 'p%d' % self._node_seq
+        self.tree.insert(parent, 'end', iid=iid, text='')
+        self.placeholders.add(iid)
+
+    def _populate(self, iid, force=False):
+        """Read one level of children, once, unless forced to re-read."""
+        if iid in self.populated and not force:
+            return
+        self.populated.add(iid)
+        for child in self.tree.get_children(iid):
+            if child in self.placeholders or force:
+                self.tree.delete(child)
+                self.placeholders.discard(child)
+                self.node_path.pop(child, None)
+                self.populated.discard(child)
+        for name, path in subdirectories(self.node_path[iid]):
+            self._add_node(iid, path, name)
 
     def _on_tree_open(self, _event):
-        node = self.tree.focus()
-        children = self.tree.get_children(node)
-        if len(children) == 1 and children[0].startswith('\u2400dummy'):
-            self._populate_node(node)
+        iid = self.tree.focus()
+        if iid in self.node_path:
+            self._populate(iid)
 
     def _on_tree_select(self, _event):
         selection = self.tree.selection()
-        node = selection[0] if selection else self.tree.focus()
-        if node and os.path.isdir(node):
-            self.show_folder(node)
+        iid = selection[0] if selection else None
+        path = self.node_path.get(iid) if iid else None
+        if path and os.path.isdir(path):
+            self.show_folder(path)
+            self.settings['last_dir'] = path
+            save_settings(self.settings)
+
+    def choose_folder(self):
+        """Pick a folder in a dialog, then reveal it in the tree."""
+        initial = self.current_dir or os.path.expanduser('~')
+        chosen = filedialog.askdirectory(title='Go to folder',
+                                         initialdir=initial)
+        if chosen:
+            self.reveal_path(chosen)
+
+    def _root_for(self, path):
+        """The tree root that contains path — the longest one that matches."""
+        best = None
+        lowered = path.lower() if sys.platform == 'win32' else path
+        for iid in self.tree.get_children(''):
+            root = self.node_path[iid]
+            probe = root.lower() if sys.platform == 'win32' else root
+            stem = probe.rstrip('\\/')
+            if lowered == stem or lowered.startswith(stem + os.sep) or probe == '/':
+                if best is None or len(self.node_path[best]) < len(root):
+                    best = iid
+        return best
+
+    def reveal_path(self, path):
+        """Expand the tree down to path and select it."""
+        path = os.path.abspath(path)
+        if not os.path.isdir(path):
+            return None
+        root = self._root_for(path)
+        if root is None:
+            return None
+
+        try:
+            relative = os.path.relpath(path, self.node_path[root])
+        except ValueError:           # different drive on Windows
+            return None
+        parts = [] if relative == '.' else [
+            part for part in relative.split(os.sep) if part not in ('', '.')]
+        if any(part == '..' for part in parts):
+            return None
+
+        node = root
+        for part in parts:
+            self._populate(node)
+            self.tree.item(node, open=True)
+            match = None
+            for child in self.tree.get_children(node):
+                child_path = self.node_path.get(child)
+                if child_path is None:
+                    continue
+                name = os.path.basename(child_path.rstrip('\\/'))
+                if name == part or (sys.platform == 'win32'
+                                    and name.lower() == part.lower()):
+                    match = child
+                    break
+            if match is None:
+                break                # folder vanished or is unreadable
+            node = match
+
+        self.tree.item(node, open=True)
+        self._populate(node)
+        self.tree.see(node)
+        self.tree.selection_set(node)
+        self.tree.focus(node)
+        return node
 
     # -- grid ------------------------------------------------------------
 
@@ -1013,6 +1175,10 @@ class FabBrowser:
         threading.Thread(target=work, daemon=True).start()
 
     def refresh(self):
+        """Re-read the selected folder, on disk and in the tree."""
+        selection = self.tree.selection()
+        if selection and selection[0] in self.node_path:
+            self._populate(selection[0], force=True)
         if self.current_dir:
             self.show_folder(self.current_dir)
 
