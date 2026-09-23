@@ -34,6 +34,9 @@ from PIL import Image, ImageTk, ImageDraw
 
 APP_NAME = "BB Fab Browser"
 APP_SLUG = "bb-fab-browser"
+# Bumped whenever behaviour worth telling apart changes. Shown in the title
+# bar so a stale PyInstaller build is obvious at a glance.
+APP_VERSION = "1.1 (shared cache)"
 
 # Archives we look inside
 ARCHIVE_EXTS = ('.zip',)
@@ -277,7 +280,7 @@ class ThumbnailCache:
     def _put_shared(self, path, stat, thumb_size, image):
         """Write to the folder's shared cache; False if that isn't possible."""
         folder = os.path.dirname(os.path.abspath(path))
-        if folder in self._read_only:
+        if folder in self._read_only:   # already refused once
             return False
         target = self._shared_file(path, stat, thumb_size)
         try:
@@ -338,6 +341,31 @@ class ThumbnailCache:
                     os.remove(os.path.join(folder, name))
                 except OSError:
                     pass
+
+    def shared_dir_for(self, path):
+        """Where the shared cache for this archive's folder lives."""
+        return os.path.join(os.path.dirname(os.path.abspath(path)),
+                            SHARED_CACHE_DIR)
+
+    def is_read_only(self, folder):
+        """True once a shared write to this folder has been refused."""
+        return os.path.abspath(folder) in self._read_only
+
+    @staticmethod
+    def count_pngs(folder):
+        """(file count, total bytes) of thumbnails under folder."""
+        if not folder or not os.path.isdir(folder):
+            return 0, 0
+        count = total = 0
+        for root, _dirs, files in os.walk(folder):
+            for name in files:
+                if name.endswith('.png'):
+                    try:
+                        total += os.path.getsize(os.path.join(root, name))
+                        count += 1
+                    except OSError:
+                        pass
+        return count, total
 
     def clear(self, folders=()):
         """Empty the per-user cache and the shared caches of `folders`."""
@@ -1128,7 +1156,7 @@ class FabBrowser:
 
     def __init__(self, root):
         self.root = root
-        self.root.title(APP_NAME)
+        self.root.title('%s  %s' % (APP_NAME, APP_VERSION))
         self.root.geometry('1280x820')
         self.root.minsize(760, 480)
 
@@ -1435,6 +1463,11 @@ class FabBrowser:
             parts.append('%d archives' % total)
         if pending:
             parts.append('loading %d previews...' % pending)
+        elif (self.current_dir and total
+                and self.cache.is_read_only(self.current_dir)):
+            # Otherwise this failure is completely invisible: thumbnails just
+            # quietly land in the per-user cache instead of being shared.
+            parts.append('shared cache not writable here - using per-user cache')
         self.status_var.set('   -   '.join(parts))
 
     def _on_card_select(self, item):
@@ -1451,14 +1484,55 @@ class FabBrowser:
         DetailWindow(self.root, item['path'])
 
     def clear_cache(self):
+        """Report where thumbnails are actually going, then offer to clear."""
         folders = {os.path.dirname(item['path']) for item in self.grid.items}
         if self.current_dir:
             folders.add(self.current_dir)
-        removed = self.cache.clear(folders)
-        messagebox.showinfo(
-            APP_NAME, 'Removed %d cached thumbnails from your local cache and '
-                      'the shared cache of the folders on screen.' % removed)
-        self.refresh()
+
+        lines = ['%s %s' % (APP_NAME, APP_VERSION), '']
+        shared_total = 0
+        if folders:
+            lines.append('Shared cache (next to the archives):')
+            for folder in sorted(folders):
+                shared = os.path.join(folder, SHARED_CACHE_DIR)
+                count, size = self.cache.count_pngs(shared)
+                shared_total += count
+                if self.cache.is_read_only(folder):
+                    note = 'CANNOT WRITE HERE - this folder is read-only, so '\
+                           'thumbnails go to your per-user cache instead'
+                elif not os.path.isdir(shared):
+                    note = 'not created yet'
+                else:
+                    note = '%d thumbnails, %s' % (count, human_size(size))
+                lines.append('   %s' % shared)
+                lines.append('      %s' % note)
+        else:
+            lines.append('Shared cache: no folder open yet.')
+
+        lines.append('')
+        lines.append('Per-user cache (fallback):')
+        if not self.cache.dir:
+            lines.append('   disabled - the folder could not be created')
+            local_count = 0
+        else:
+            local_count, local_size = self.cache.count_pngs(self.cache.dir)
+            lines.append('   %s' % self.cache.dir)
+            lines.append('      %d thumbnails, %s'
+                         % (local_count, human_size(local_size)))
+        lines.append('')
+        lines.append('On Windows the AppData folder is hidden in Explorer; '
+                     'paste the path above into the address bar to open it.')
+
+        if shared_total + local_count == 0:
+            messagebox.showinfo(APP_NAME, '\n'.join(lines))
+            return
+        lines.append('')
+        lines.append('Clear both now?')
+        if messagebox.askyesno(APP_NAME, '\n'.join(lines)):
+            removed = self.cache.clear(folders)
+            messagebox.showinfo(APP_NAME,
+                                'Removed %d cached thumbnails.' % removed)
+            self.refresh()
 
     def _on_close(self):
         self.settings['recursive'] = self.recursive_var.get()
@@ -1468,6 +1542,16 @@ class FabBrowser:
 
 
 def main():
+    if '--cache-dir' in sys.argv or '--where' in sys.argv:
+        print('%s %s' % (APP_NAME, APP_VERSION))
+        print('shared cache : a "%s" folder beside each set of archives'
+              % SHARED_CACHE_DIR)
+        print('per-user cache: %s' % user_cache_dir())
+        print('   exists: %s' % os.path.isdir(user_cache_dir()))
+        print('settings file : %s' % user_config_path())
+        print('   exists: %s' % os.path.isfile(user_config_path()))
+        return
+
     try:
         from tkinterdnd2 import TkinterDnD
         root = TkinterDnD.Tk()

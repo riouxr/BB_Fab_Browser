@@ -148,5 +148,25 @@ needing a display.
 
 Thumbnails go to the shared `bbfab_cache` folder whenever you can write to the
 folder holding the zips; on read-only folders they go to your local cache
-instead. **Clear thumbnail cache** in the toolbar empties your local cache and
-the shared cache of the folders currently on screen.
+instead. **Clear thumbnail cache** in the toolbar first reports where thumbnails are
+actually going -- the shared folder beside each set of archives, how many it
+holds, and the per-user fallback -- then offers to empty both.
+
+### No `bbfab_cache` folder appearing?
+
+Two reasons it silently won't be created:
+
+1. **The archive folder isn't writable** (a read-only network share, or a
+   folder you lack write permission on). Thumbnails fall back to the per-user
+   cache. The status bar now says `shared cache not writable here` when this
+   happens, and the cache dialog marks the folder `CANNOT WRITE HERE`.
+2. **You're running a stale `.exe`.** A PyInstaller build is a snapshot of the
+   source at build time; pulling new code does not change an already-built
+   exe. The title bar shows the version, so check it matches, and rebuild with
+   `build_exe.bat` if not.
+
+To see the paths without launching the GUI:
+
+```bash
+python bb_fab_browser.py --cache-dir
+```
